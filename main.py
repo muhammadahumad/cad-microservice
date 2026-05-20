@@ -8,7 +8,7 @@ import traceback
 
 app = FastAPI()
 
-# --- CORS middleware (allow all origins for development) ---
+# --- CORS middleware ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,18 +29,18 @@ def _get(obj, *keys, default=None):
         return default
 
 # ----------------------------------------
-# DXF generation
+# DXF generation (text‑based → returns bytes)
 # ----------------------------------------
-def generate_dxf(data: dict) -> io.BytesIO:
+def generate_dxf(data: dict) -> bytes:
     doc = ezdxf.new(dxfversion='R2010')
     msp = doc.modelspace()
     doc.header['$INSUNITS'] = units.MM
 
     # Layers
-    doc.layers.new('S-GRID', dxfattribs={'color': 1})   # red
-    doc.layers.new('S-FNDN-FTG', dxfattribs={'color': 4}) # cyan
-    doc.layers.new('S-REBAR-BOT', dxfattribs={'color': 2}) # yellow
-    doc.layers.new('S-ANNO-TEXT', dxfattribs={'color': 7}) # white
+    doc.layers.new('S-GRID', dxfattribs={'color': 1})
+    doc.layers.new('S-FNDN-FTG', dxfattribs={'color': 4})
+    doc.layers.new('S-REBAR-BOT', dxfattribs={'color': 2})
+    doc.layers.new('S-ANNO-TEXT', dxfattribs={'color': 7})
 
     # --- Raft boundary ---
     raft_boundary = _get(data, 'foundation_geometry', 'raft_boundary', default=[])
@@ -96,26 +96,26 @@ def generate_dxf(data: dict) -> io.BytesIO:
         msp.add_text(note, dxfattribs={'layer': 'S-ANNO-TEXT'}).set_placement((0, y_pos))
         y_pos -= 400
 
-    buf = io.BytesIO()
+    # Write to string buffer, then encode to bytes
+    buf = io.StringIO()
     doc.write(buf)
     buf.seek(0)
-    return buf
+    return buf.getvalue().encode('utf-8')
 
 # ----------------------------------------
-# Endpoint – with proper error handling
+# Endpoint
 # ----------------------------------------
 @app.post("/generate-dxf")
 async def generate_dxf_endpoint(request: Request):
     try:
         data = await request.json()
-        buf = generate_dxf(data)
+        dxf_bytes = generate_dxf(data)
         return StreamingResponse(
-            buf,
+            io.BytesIO(dxf_bytes),
             media_type="application/dxf",
             headers={"Content-Disposition": "attachment; filename=layout.dxf"}
         )
     except Exception as e:
-        # Print full traceback to Railway logs
         traceback.print_exc()
         return JSONResponse(
             status_code=500,
