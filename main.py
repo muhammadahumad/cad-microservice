@@ -8,7 +8,7 @@ import traceback
 
 app = FastAPI()
 
-# --- CORS middleware (allows all origins for development) ---
+# --- CORS middleware ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,6 +16,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Explicit OPTIONS handler for /generate-dxf ---
+@app.options("/generate-dxf")
+async def options_handler():
+    return JSONResponse(status_code=200, content={})
 
 # ----------------------------------------
 # Helper – safely get a nested key from a dict
