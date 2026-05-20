@@ -8,7 +8,7 @@ import traceback
 
 app = FastAPI()
 
-# --- CORS middleware ---
+# --- CORS middleware (allows all origins for development) ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
