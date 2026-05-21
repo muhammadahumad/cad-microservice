@@ -22,17 +22,15 @@ Rules:
 - Place cores at back-right corner.
 - Rooms grouped by apartmentId.
 - Priority: living=1, kitchen=1, bedrooms=2, bathroom=3.
-- No extra text.`;
+- Do NOT wrap the output in markdown code fences. Output ONLY the raw JSON object.`;
 
   const apiKey = process.env.OPENAI_API_KEY;
-  console.log('OPENAI_API_KEY exists:', !!apiKey);
   if (!apiKey) {
     console.error('Missing OPENAI_API_KEY');
     return res.status(500).json({ error: 'Server configuration error: missing API key' });
   }
 
   try {
-    console.log('Calling OpenAI...');
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -50,27 +48,19 @@ Rules:
       })
     });
 
-    const responseBody = await response.text();
-    console.log('OpenAI status:', response.status);
-    console.log('OpenAI response (first 500 chars):', responseBody.substring(0, 500));
-
-    if (!response.ok) {
-      console.error('OpenAI error:', responseBody);
-      return res.status(500).json({ error: 'OpenAI API error', detail: responseBody });
-    }
-
-    const data = JSON.parse(responseBody);
-    if (!data.choices || data.choices.length === 0) {
-      console.error('No choices in response:', responseBody);
-      return res.status(500).json({ error: 'AI did not return any layout. Try a different prompt.' });
-    }
-
+    const data = await response.json();
     const content = data.choices[0].message.content;
-    const layout = JSON.parse(content);
+
+    // 🔧 Strip markdown code fences if present
+    let cleaned = content.trim();
+    if (cleaned.startsWith('```')) {
+      cleaned = cleaned.replace(/^```json?\s*/i, '').replace(/\s*```$/i, '');
+    }
+
+    const layout = JSON.parse(cleaned);
     res.json(layout);
   } catch (err) {
     console.error('AI generation error:', err.message);
-    console.error(err.stack);
     res.status(500).json({ error: 'AI generation failed', detail: err.message });
   }
 });
