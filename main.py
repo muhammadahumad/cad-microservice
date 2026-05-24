@@ -1,14 +1,15 @@
 import ezdxf
 from ezdxf import units
+from ezdxf.math import Vec2
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import io
 import traceback
+import json
 
 app = FastAPI()
 
-# --- CORS middleware ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,14 +18,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Explicit OPTIONS handler for /generate-dxf ---
 @app.options("/generate-dxf")
 async def options_handler():
     return JSONResponse(status_code=200, content={})
 
-# ----------------------------------------
-# Helper – safely get a nested key from a dict
-# ----------------------------------------
+# ── Helper ─────────────────────────────────────────────
 def _get(obj, *keys, default=None):
     try:
         for k in keys:
@@ -33,83 +31,146 @@ def _get(obj, *keys, default=None):
     except (KeyError, TypeError):
         return default
 
-# ----------------------------------------
-# DXF generation (text‑based → returns bytes)
-# ----------------------------------------
+# ── AIA‑standard layer definitions ─────────────────────
+LAYERS = {
+    "A-WALL-EXT":  {"color": 7, "lw": 0.50},   # exterior walls
+    "A-WALL-INT":  {"color": 3, "lw": 0.35},   # interior walls
+    "A-DOOR":      {"color": 4, "lw": 0.25},   # doors
+    "A-WINDOW":    {"color": 5, "lw": 0.25},   # windows
+    "A-STAIR":     {"color": 1, "lw": 0.30},   # stairs
+    "A-DIMS":      {"color": 2, "lw": 0.18},   # dimensions
+    "A-ANNO-TEXT": {"color": 7, "lw": 0.18},   # text/annotations
+    "S-GRID":      {"color": 8, "lw": 0.18},   # structural grid
+    "S-COLM":      {"color": 6, "lw": 0.40},   # columns
+    "S-BEAM":      {"color": 5, "lw": 0.40},   # beams
+}
+
+def setup_layers(doc):
+    for name, props in LAYERS.items():
+        if name not in doc.layers:
+            layer = doc.layers.new(name)
+            layer.color = props["color"]
+            layer.set_lineweight(props["lw"])
+
+# ── Generate Architectural DXF ─────────────────────────
 def generate_dxf(data: dict) -> bytes:
-    doc = ezdxf.new(dxfversion='R2010')
+    doc = ezdxf.new(dxfversion="R2010")
+    doc.header["$INSUNITS"] = units.M
     msp = doc.modelspace()
-    doc.header['$INSUNITS'] = units.MM
+    setup_layers(doc)
 
-    # Layers
-    doc.layers.new('S-GRID', dxfattribs={'color': 1})
-    doc.layers.new('S-FNDN-FTG', dxfattribs={'color': 4})
-    doc.layers.new('S-REBAR-BOT', dxfattribs={'color': 2})
-    doc.layers.new('S-ANNO-TEXT', dxfattribs={'color': 7})
+    # 1. Plot boundary
+    bw = _get(data, "buildableWidth", default=10.0)
+    bd = _get(data, "buildableDepth", default=15.0)
+    setback = _get(data, "setback", default=1.5)
+    wall_thk = _get(data, "wallThickness", default=0.15)
+    total_w = bw + 2 * setback
+    total_d = bd + 2 * setback
 
-    # --- Raft boundary ---
-    raft_boundary = _get(data, 'foundation_geometry', 'raft_boundary', default=[])
-    if raft_boundary:
-        pts = [(p['x'], p['y']) for p in raft_boundary]
-        msp.add_lwpolyline(pts, close=True, dxfattribs={'layer': 'S-FNDN-FTG'})
+    # Outer envelope
+    msp.add_lwpolyline(
+        [(0, 0), (total_w, 0), (total_w, total_d), (0, total_d)],
+        close=True, dxfattribs={"layer": "A-WALL-EXT"}
+    )
+    # Inner envelope
+    msp.add_lwpolyline(
+        [(setback, setback), (total_w - setback, setback),
+         (total_w - setback, total_d - setback), (setback, total_d - setback)],
+        close=True, dxfattribs={"layer": "A-WALL-EXT"}
+    )
 
-    # --- Grid lines ---
-    grid = _get(data, 'grid_lines', default={})
-    max_y = max((p['y'] for p in raft_boundary), default=10000)
-    for x_axis in grid.get('x_axis', []):
-        x = x_axis.get('x_coordinate', 0)
-        label = x_axis.get('label', '')
-        msp.add_line((x, 0), (x, max_y), dxfattribs={'layer': 'S-GRID'})
-        msp.add_text(f'({label})', dxfattribs={'layer': 'S-ANNO-TEXT'}).set_placement((x, -200))
+    # 2. Structural grid
+    grid = _get(data, "grid_lines", default={})
+    for x_axis in grid.get("x_axis", []):
+        x = x_axis.get("x_coordinate", 0) + setback
+        msp.add_line((x, 0), (x, total_d), dxfattribs={"layer": "S-GRID"})
+        msp.add_text(f'({x_axis.get("label","")})', dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.3}).set_placement((x + 0.1, -0.5))
+    for y_axis in grid.get("y_axis", []):
+        y = y_axis.get("y_coordinate", 0) + setback
+        msp.add_line((0, y), (total_w, y), dxfattribs={"layer": "S-GRID"})
+        msp.add_text(f'({y_axis.get("label","")})', dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.3}).set_placement((-0.8, y + 0.1))
 
-    max_x = max((p['x'] for p in raft_boundary), default=10000)
-    for y_axis in grid.get('y_axis', []):
-        y = y_axis.get('y_coordinate', 0)
-        label = y_axis.get('label', '')
-        msp.add_line((0, y), (max_x, y), dxfattribs={'layer': 'S-GRID'})
-        msp.add_text(f'({label})', dxfattribs={'layer': 'S-ANNO-TEXT'}).set_placement((-500, y))
+    # 3. Rooms as interior walls
+    rooms = _get(data, "rooms", default=[])
+    for room in rooms:
+        rx = room.get("x", 0) + setback
+        ry = room.get("y", 0) + setback
+        rw = room.get("width", 2)
+        rd = room.get("depth", 2)
+        rtype = room.get("type", "internal")
 
-    # --- Columns & piles ---
-    elements = _get(data, 'structural_elements', default=[])
-    for elem in elements:
-        coords = elem.get('coordinates', {})
-        x = coords.get('x', 0)
-        y = coords.get('y', 0)
-        dims = elem.get('dimensions', {})
-        w = dims.get('width', 400)
-        d = dims.get('depth', 600)
+        layer = "A-STAIR" if rtype == "stairs" else "A-WALL-INT"
         msp.add_lwpolyline(
-            [(x - w/2, y - d/2), (x + w/2, y - d/2), (x + w/2, y + d/2), (x - w/2, y + d/2)],
-            close=True, dxfattribs={'layer': 'S-FNDN-FTG'}
+            [(rx, ry), (rx + rw, ry), (rx + rw, ry + rd), (rx, ry + rd)],
+            close=True, dxfattribs={"layer": layer}
         )
-        pile = elem.get('underlying_pile', {})
-        pile_dia = pile.get('diameter', 600)
-        msp.add_circle((x, y), pile_dia/2, dxfattribs={'layer': 'S-FNDN-FTG'})
-        eid = elem.get('element_id', 'C?')
-        msp.add_text(eid, dxfattribs={'layer': 'S-ANNO-TEXT'}).set_placement((x, y + 300))
 
-    # --- Reinforcement notes ---
-    reinf = _get(data, 'reinforcement_matrix', default={})
-    bottom = reinf.get('bottom_mesh', {})
-    top = reinf.get('top_mesh', {})
-    notes = [
-        f"Bottom: {bottom.get('main_bars','?')}",
-        f"Top: {top.get('main_bars','?')}"
-    ]
-    y_pos = _get(data, 'foundation_geometry', 'raft_boundary', 0, 'y', default=-2000) - 1000
-    for note in notes:
-        msp.add_text(note, dxfattribs={'layer': 'S-ANNO-TEXT'}).set_placement((0, y_pos))
-        y_pos -= 400
+        # Door arc on bottom edge
+        door_x = rx + rw * 0.5
+        door_y = ry + rd
+        msp.add_arc(
+            center=(door_x - wall_thk/2, door_y),
+            radius=0.9,
+            start_angle=0, end_angle=90,
+            dxfattribs={"layer": "A-DOOR"}
+        )
 
-    # Write to string buffer, then encode to bytes
+        # Window on top edge for living/bedroom
+        if rtype in ("living", "bedroom"):
+            win_x = rx + rw * 0.3
+            win_y = ry
+            msp.add_line((win_x, win_y), (win_x + 1.2, win_y), dxfattribs={"layer": "A-WINDOW"})
+            msp.add_line((win_x, win_y + 0.05), (win_x + 1.2, win_y + 0.05), dxfattribs={"layer": "A-WINDOW"})
+
+        # Room label
+        msp.add_text(
+            f'{room.get("name","")}\n{room.get("width",0)*room.get("depth",0):.1f} m²',
+            dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.3}
+        ).set_placement((rx + 0.3, ry + rw / 2))
+
+    # 4. Columns
+    elements = _get(data, "structural_elements", default=[])
+    for elem in elements:
+        coords = elem.get("coordinates", {})
+        cx = coords.get("x", 0) + setback
+        cy = coords.get("y", 0) + setback
+        dims = elem.get("dimensions", {})
+        cw = dims.get("width", 0.4)
+        cd = dims.get("depth", 0.6)
+        msp.add_lwpolyline(
+            [(cx - cw/2, cy - cd/2), (cx + cw/2, cy - cd/2),
+             (cx + cw/2, cy + cd/2), (cx - cw/2, cy + cd/2)],
+            close=True, dxfattribs={"layer": "S-COLM"}
+        )
+        eid = elem.get("element_id", "C?")
+        msp.add_text(eid, dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.25}).set_placement((cx - 0.15, cy + cd/2 + 0.2))
+
+    # 5. Overall dimensions
+    dim_y = total_d + 1.5
+    msp.add_line((0, dim_y), (total_w, dim_y), dxfattribs={"layer": "A-DIMS"})
+    msp.add_line((0, dim_y - 0.3), (0, dim_y + 0.3), dxfattribs={"layer": "A-DIMS"})
+    msp.add_line((total_w, dim_y - 0.3), (total_w, dim_y + 0.3), dxfattribs={"layer": "A-DIMS"})
+    msp.add_text(f'{total_w:.2f}m', dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.35}).set_placement((total_w/2 - 0.5, dim_y + 0.3))
+
+    dim_x = total_w + 1.5
+    msp.add_line((dim_x, 0), (dim_x, total_d), dxfattribs={"layer": "A-DIMS"})
+    msp.add_line((dim_x - 0.3, 0), (dim_x + 0.3, 0), dxfattribs={"layer": "A-DIMS"})
+    msp.add_line((dim_x - 0.3, total_d), (dim_x + 0.3, total_d), dxfattribs={"layer": "A-DIMS"})
+    msp.add_text(f'{total_d:.2f}m', dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.35}).set_placement((dim_x + 0.3, total_d/2))
+
+    # 6. Title block
+    title_y = -3
+    msp.add_text("ARQBLD - AI Generated Architectural Plan", dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.5}).set_placement((1, title_y))
+    msp.add_text(f'Scale: 1:100 | Date: {_get(data,"date",default="2025")}', dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.3}).set_placement((1, title_y - 0.6))
+    msp.add_text("HDC / MNBC Compliant Layout", dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.3}).set_placement((1, title_y - 1.0))
+
+    # Write
     buf = io.StringIO()
     doc.write(buf)
     buf.seek(0)
-    return buf.getvalue().encode('utf-8')
+    return buf.getvalue().encode("utf-8")
 
-# ----------------------------------------
-# Endpoint
-# ----------------------------------------
+# ── Endpoint ───────────────────────────────────────────
 @app.post("/generate-dxf")
 async def generate_dxf_endpoint(request: Request):
     try:
@@ -122,7 +183,4 @@ async def generate_dxf_endpoint(request: Request):
         )
     except Exception as e:
         traceback.print_exc()
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "detail": str(e)}
-        )
+        return JSONResponse(status_code=500, content={"status": "error", "detail": str(e)})
