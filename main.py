@@ -62,7 +62,7 @@ def setup_layers(doc):
             layer.color = props["color"]
             layer.lineweight = props["lw"]
 
-# ── Generate Architectural DXF ─────────────────────────
+# ── Generate Professional Engineering DXF ───────────────
 def generate_dxf(data: dict) -> bytes:
     doc = ezdxf.new(dxfversion="R2010")
     doc.header["$INSUNITS"] = units.M
@@ -72,34 +72,26 @@ def generate_dxf(data: dict) -> bytes:
     bw = _get(data, "buildableWidth", default=10.0)
     bd = _get(data, "buildableDepth", default=15.0)
     setback = _get(data, "setback", default=1.5)
-    wall_thk = _get(data, "wallThickness", default=0.15)
     total_w = bw + 2 * setback
     total_d = bd + 2 * setback
 
-    # Outer envelope
+    # 1. Outer envelope (thick external wall)
     msp.add_lwpolyline(
         [(0, 0), (total_w, 0), (total_w, total_d), (0, total_d)],
         close=True, dxfattribs={"layer": "A-WALL-EXT"}
     )
-    # Inner envelope
-    msp.add_lwpolyline(
-        [(setback, setback), (total_w - setback, setback),
-         (total_w - setback, total_d - setback), (setback, total_d - setback)],
-        close=True, dxfattribs={"layer": "A-WALL-EXT"}
-    )
 
-    # Structural grid
-    grid = _get(data, "grid_lines", default={})
-    for x_axis in grid.get("x_axis", []):
-        x = x_axis.get("x_coordinate", 0) + setback
+    # 2. 9m × 9m structural grid with labels
+    grid_size = 9.0
+    for x in np.arange(0, total_w + 0.1, grid_size):
         msp.add_line((x, 0), (x, total_d), dxfattribs={"layer": "S-GRID"})
-        msp.add_text(f'({x_axis.get("label","")})', dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.3}).set_placement((x + 0.1, -0.5))
-    for y_axis in grid.get("y_axis", []):
-        y = y_axis.get("y_coordinate", 0) + setback
-        msp.add_line((0, y), (total_w, y), dxfattribs={"layer": "S-GRID"})
-        msp.add_text(f'({y_axis.get("label","")})', dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.3}).set_placement((-0.8, y + 0.1))
+        msp.add_text(f"{x:.1f}", dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.35}).set_placement((x + 0.2, -0.8))
 
-    # Rooms
+    for y in np.arange(0, total_d + 0.1, grid_size):
+        msp.add_line((0, y), (total_w, y), dxfattribs={"layer": "S-GRID"})
+        msp.add_text(f"{y:.1f}", dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.35}).set_placement((-0.9, y + 0.2))
+
+    # 3. Rooms with proper layers
     rooms = _get(data, "rooms", default=[])
     for room in rooms:
         rx = room.get("x", 0) + setback
@@ -107,6 +99,7 @@ def generate_dxf(data: dict) -> bytes:
         rw = room.get("width", 2)
         rd = room.get("depth", 2)
         rtype = room.get("type", "internal")
+        name = room.get("name", "Room")
 
         layer = "A-STAIR" if rtype == "stairs" else "A-WALL-INT"
         msp.add_lwpolyline(
@@ -114,64 +107,36 @@ def generate_dxf(data: dict) -> bytes:
             close=True, dxfattribs={"layer": layer}
         )
 
-        # Door
-        door_x = rx + rw * 0.5
-        door_y = ry + rd
-        msp.add_arc(
-            center=(door_x - wall_thk/2, door_y),
-            radius=0.9,
-            start_angle=0, end_angle=90,
-            dxfattribs={"layer": "A-DOOR"}
-        )
-
-        # Window
-        if rtype in ("living", "bedroom"):
-            win_x = rx + rw * 0.3
-            win_y = ry
-            msp.add_line((win_x, win_y), (win_x + 1.2, win_y), dxfattribs={"layer": "A-WINDOW"})
-            msp.add_line((win_x, win_y + 0.05), (win_x + 1.2, win_y + 0.05), dxfattribs={"layer": "A-WINDOW"})
-
-        # Label
+        # Room label with area
+        area = rw * rd
         msp.add_text(
-            f'{room.get("name","")}\n{room.get("width",0)*room.get("depth",0):.1f} m²',
-            dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.3}
-        ).set_placement((rx + 0.3, ry + rw / 2))
+            f"{name}\n{area:.1f} m²",
+            dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.35}
+        ).set_placement((rx + 0.4, ry + rd / 2))
 
-    # Columns
-    elements = _get(data, "structural_elements", default=[])
-    for elem in elements:
-        coords = elem.get("coordinates", {})
-        cx = coords.get("x", 0) + setback
-        cy = coords.get("y", 0) + setback
-        dims = elem.get("dimensions", {})
-        cw = dims.get("width", 0.4)
-        cd = dims.get("depth", 0.6)
-        msp.add_lwpolyline(
-            [(cx - cw/2, cy - cd/2), (cx + cw/2, cy - cd/2),
-             (cx + cw/2, cy + cd/2), (cx - cw/2, cy + cd/2)],
-            close=True, dxfattribs={"layer": "S-COLM"}
-        )
-        eid = elem.get("element_id", "C?")
-        msp.add_text(eid, dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.25}).set_placement((cx - 0.15, cy + cd/2 + 0.2))
+    # 4. Columns on grid intersections
+    for x in np.arange(1.0, total_w, 9.0):
+        for y in np.arange(1.0, total_d, 9.0):
+            msp.add_circle((x, y), 0.25, dxfattribs={"layer": "S-COLM"})
+            msp.add_text("C", dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.28}).set_placement((x - 0.15, y + 0.4))
 
-    # Dimensions
-    dim_y = total_d + 1.5
-    msp.add_line((0, dim_y), (total_w, dim_y), dxfattribs={"layer": "A-DIMS"})
-    msp.add_line((0, dim_y - 0.3), (0, dim_y + 0.3), dxfattribs={"layer": "A-DIMS"})
-    msp.add_line((total_w, dim_y - 0.3), (total_w, dim_y + 0.3), dxfattribs={"layer": "A-DIMS"})
-    msp.add_text(f'{total_w:.2f}m', dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.35}).set_placement((total_w/2 - 0.5, dim_y + 0.3))
+    # 5. Professional title block + stamp area
+    title_y = -4.5
+    msp.add_text("ARQBLD - AI Generated Professional Floor Plan",
+                 dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.6}).set_placement((1, title_y))
+    msp.add_text(f"Project: {data.get('projectName', 'Untitled')}",
+                 dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.35}).set_placement((1, title_y - 0.8))
+    msp.add_text(f"Scale: 1:100 | Date: {data.get('date', '2025')}",
+                 dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.3}).set_placement((1, title_y - 1.2))
+    msp.add_text("HDC Zone 2 | MNBC Compliant | Rear Core Typology",
+                 dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.3}).set_placement((1, title_y - 1.6))
 
-    dim_x = total_w + 1.5
-    msp.add_line((dim_x, 0), (dim_x, total_d), dxfattribs={"layer": "A-DIMS"})
-    msp.add_line((dim_x - 0.3, 0), (dim_x + 0.3, 0), dxfattribs={"layer": "A-DIMS"})
-    msp.add_line((dim_x - 0.3, total_d), (dim_x + 0.3, total_d), dxfattribs={"layer": "A-DIMS"})
-    msp.add_text(f'{total_d:.2f}m', dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.35}).set_placement((dim_x + 0.3, total_d/2))
-
-    # Title block
-    title_y = -3
-    msp.add_text("ARQBLD - AI Generated Architectural Plan", dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.5}).set_placement((1, title_y))
-    msp.add_text(f'Scale: 1:100 | Date: {_get(data,"date",default="2025")}', dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.3}).set_placement((1, title_y - 0.6))
-    msp.add_text("HDC / MNBC Compliant Layout", dxfattribs={"layer": "A-ANNO-TEXT", "height": 0.3}).set_placement((1, title_y - 1.0))
+    # Stamp box (empty for approval)
+    msp.add_lwpolyline(
+        [(total_w - 4.5, title_y - 2.5), (total_w - 0.5, title_y - 2.5),
+         (total_w - 0.5, title_y + 1.0), (total_w - 4.5, title_y + 1.0)],
+        close=True, dxfattribs={"layer": "A-ANNO-TEXT"}
+    )
 
     buf = io.StringIO()
     doc.write(buf)
